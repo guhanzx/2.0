@@ -22,7 +22,7 @@ from cinderella.modules import ALL_MODULES
 from cinderella.modules.helper_funcs.chat_status import is_user_admin
 from cinderella.modules.helper_funcs.misc import paginate_modules
 from cinderella.modules.connection import connected
-from cinderella.modules.connection import connect_button
+
 
 
 PM_START_TEXT = """
