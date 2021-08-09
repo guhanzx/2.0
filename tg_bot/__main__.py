@@ -7,8 +7,6 @@ import resource
 import platform
 from sys import argv
 import traceback
-import requests
-from parsel import Selector
 import json
 from urllib.request import urlopen
 
