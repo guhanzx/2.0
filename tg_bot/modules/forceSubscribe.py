@@ -4,7 +4,6 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-static_data_filter = filters.create(lambda _, __, query: query.data == "onUnMuteRequest")
 @Client.on_callback_query(static_data_filter)
 def _onUnMuteRequest(client, cb):
   user_id = cb.from_user.id
