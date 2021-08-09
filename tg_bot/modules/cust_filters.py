@@ -1,373 +1,213 @@
-import os
-import re
-import io
-import pyrogram
+import threading
 
-from pyrogram import filters, Client
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from sqlalchemy import Column, String, UnicodeText, Boolean, Integer, distinct, func
 
-if bool(os.environ.get("WEBHOOK", False)):
-    from sample_config import Config
-else:
-    from config import Config
-
-from database.filters_mdb import(
-   add_filter,
-   find_filter,
-   get_filters,
-   delete_filter,
-   count_filters
-)
-
-from database.connections_mdb import active_connection
-from database.users_mdb import add_user, all_users
-
-from plugins.helpers import parser,split_quotes
+from tg_bot.modules.sql import BASE, SESSION
 
 
+class CustomFilters(BASE):
+    __tablename__ = "cust_filters"
+    chat_id = Column(String(14), primary_key=True)
+    keyword = Column(UnicodeText, primary_key=True, nullable=False)
+    reply = Column(UnicodeText, nullable=False)
+    is_sticker = Column(Boolean, nullable=False, default=False)
+    is_document = Column(Boolean, nullable=False, default=False)
+    is_image = Column(Boolean, nullable=False, default=False)
+    is_audio = Column(Boolean, nullable=False, default=False)
+    is_voice = Column(Boolean, nullable=False, default=False)
+    is_video = Column(Boolean, nullable=False, default=False)
 
-@Client.on_message(filters.command(Config.ADD_FILTER_CMD))
-async def addfilter(client, message):
-      
-    userid = message.from_user.id
-    chat_type = message.chat.type
-    args = message.text.html.split(None, 1)
+    has_buttons = Column(Boolean, nullable=False, default=False)
+    # NOTE: Here for legacy purposes, to ensure older filters don't mess up.
+    has_markdown = Column(Boolean, nullable=False, default=False)
 
-    if chat_type == "private":
-        grpid = await active_connection(str(userid))
-        if grpid is not None:
-            grp_id = grpid
-            try:
-                chat = await client.get_chat(grpid)
-                title = chat.title
-            except:
-                await message.reply_text("Make sure I'm present in your group!!", quote=True)
-                return
-        else:
-            await message.reply_text("I'm not connected to any groups!", quote=True)
-            return
+    def __init__(self, chat_id, keyword, reply, is_sticker=False, is_document=False, is_image=False, is_audio=False,
+                 is_voice=False, is_video=False, has_buttons=False):
+        self.chat_id = str(chat_id)  # ensure string
+        self.keyword = keyword
+        self.reply = reply
+        self.is_sticker = is_sticker
+        self.is_document = is_document
+        self.is_image = is_image
+        self.is_audio = is_audio
+        self.is_voice = is_voice
+        self.is_video = is_video
+        self.has_buttons = has_buttons
+        self.has_markdown = True
 
-    elif (chat_type == "group") or (chat_type == "supergroup"):
-        grp_id = message.chat.id
-        title = message.chat.title
+    def __repr__(self):
+        return "<Permissions for %s>" % self.chat_id
 
-    else:
-        return
-
-    st = await client.get_chat_member(grp_id, userid)
-    if not ((st.status == "administrator") or (st.status == "creator") or (str(userid) in Config.AUTH_USERS)):
-        return
-        
-
-    if len(args) < 2:
-        await message.reply_text("Command Incomplete :(", quote=True)
-        return
-    
-    extracted = split_quotes(args[1])
-    text = extracted[0].lower()
-   
-    if not message.reply_to_message and len(extracted) < 2:
-        await message.reply_text("Add some content to save your filter!", quote=True)
-        return
-
-    if (len(extracted) >= 2) and not message.reply_to_message:
-        reply_text, btn, alert = parser(extracted[1], text)
-        fileid = None
-        if not reply_text:
-            await message.reply_text("You cannot have buttons alone, give some text to go with it!", quote=True)
-            return
-
-    elif message.reply_to_message and message.reply_to_message.reply_markup:
-        try:
-            rm = message.reply_to_message.reply_markup
-            btn = rm.inline_keyboard
-            msg = message.reply_to_message.document or\
-                  message.reply_to_message.video or\
-                  message.reply_to_message.photo or\
-                  message.reply_to_message.audio or\
-                  message.reply_to_message.animation or\
-                  message.reply_to_message.sticker
-            if msg:
-                fileid = msg.file_id
-                reply_text = message.reply_to_message.caption.html
-            else:
-                reply_text = message.reply_to_message.text.html
-                fileid = None
-            alert = None
-        except:
-            reply_text = ""
-            btn = "[]" 
-            fileid = None
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.photo:
-        try:
-            fileid = message.reply_to_message.photo.file_id
-            reply_text, btn, alert = parser(message.reply_to_message.caption.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.video:
-        try:
-            fileid = message.reply_to_message.video.file_id
-            reply_text, btn, alert = parser(message.reply_to_message.caption.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.audio:
-        try:
-            fileid = message.reply_to_message.audio.file_id
-            reply_text, btn, alert = parser(message.reply_to_message.caption.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-   
-    elif message.reply_to_message and message.reply_to_message.document:
-        try:
-            fileid = message.reply_to_message.document.file_id
-            reply_text, btn, alert = parser(message.reply_to_message.caption.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.animation:
-        try:
-            fileid = message.reply_to_message.animation.file_id
-            reply_text, btn, alert = parser(message.reply_to_message.caption.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.sticker:
-        try:
-            fileid = message.reply_to_message.sticker.file_id
-            reply_text, btn, alert =  parser(extracted[1], text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    elif message.reply_to_message and message.reply_to_message.text:
-        try:
-            fileid = None
-            reply_text, btn, alert = parser(message.reply_to_message.text.html, text)
-        except:
-            reply_text = ""
-            btn = "[]"
-            alert = None
-
-    else:
-        return
-    
-    await add_filter(grp_id, text, reply_text, btn, fileid, alert)
-
-    await message.reply_text(
-        f"Filter for  `{text}`  added in  **{title}**",
-        quote=True,
-        parse_mode="md"
-    )
+    def __eq__(self, other):
+        return bool(isinstance(other, CustomFilters)
+                    and self.chat_id == other.chat_id
+                    and self.keyword == other.keyword)
 
 
-@Client.on_message(filters.command('viewfilters'))
-async def get_all(client, message):
-    
-    chat_type = message.chat.type
+class Buttons(BASE):
+    __tablename__ = "cust_filter_urls"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String(14), primary_key=True)
+    keyword = Column(UnicodeText, primary_key=True)
+    name = Column(UnicodeText, nullable=False)
+    url = Column(UnicodeText, nullable=False)
+    same_line = Column(Boolean, default=False)
 
-    if chat_type == "private":
-        userid = message.from_user.id
-        grpid = await active_connection(str(userid))
-        if grpid is not None:
-            grp_id = grpid
-            try:
-                chat = await client.get_chat(grpid)
-                title = chat.title
-            except:
-                await message.reply_text("Make sure I'm present in your group!!", quote=True)
-                return
-        else:
-            await message.reply_text("I'm not connected to any groups!", quote=True)
-            return
+    def __init__(self, chat_id, keyword, name, url, same_line=False):
+        self.chat_id = str(chat_id)
+        self.keyword = keyword
+        self.name = name
+        self.url = url
+        self.same_line = same_line
 
-    elif (chat_type == "group") or (chat_type == "supergroup"):
-        grp_id = message.chat.id
-        title = message.chat.title
 
-    else:
-        return
+CustomFilters.__table__.create(checkfirst=True)
+Buttons.__table__.create(checkfirst=True)
 
-    st = await client.get_chat_member(grp_id, userid)
-    if not ((st.status == "administrator") or (st.status == "creator") or (str(userid) in Config.AUTH_USERS)):
-        return
+CUST_FILT_LOCK = threading.RLock()
+BUTTON_LOCK = threading.RLock()
+CHAT_FILTERS = {}
 
-    texts = await get_filters(grp_id)
-    count = await count_filters(grp_id)
-    if count:
-        filterlist = f"Total number of filters in **{title}** : {count}\n\n"
 
-        for text in texts:
-            keywords = " ×  `{}`\n".format(text)
-            
-            filterlist += keywords
-
-        if len(filterlist) > 4096:
-            with io.BytesIO(str.encode(filterlist.replace("`", ""))) as keyword_file:
-                keyword_file.name = "keywords.txt"
-                await message.reply_document(
-                    document=keyword_file,
-                    quote=True
-                )
-            return
-    else:
-        filterlist = f"There are no active filters in **{title}**"
-
-    await message.reply_text(
-        text=filterlist,
-        quote=True,
-        parse_mode="md"
-    )
-        
-@Client.on_message(filters.command(Config.DELETE_FILTER_CMD))
-async def deletefilter(client, message):
-    userid = message.from_user.id
-    chat_type = message.chat.type
-
-    if chat_type == "private":
-        grpid  = await active_connection(str(userid))
-        if grpid is not None:
-            grp_id = grpid
-            try:
-                chat = await client.get_chat(grpid)
-                title = chat.title
-            except:
-                await message.reply_text("Make sure I'm present in your group!!", quote=True)
-                return
-        else:
-            await message.reply_text("I'm not connected to any groups!", quote=True)
-
-    elif (chat_type == "group") or (chat_type == "supergroup"):
-        grp_id = message.chat.id
-        title = message.chat.title
-
-    else:
-        return
-
-    st = await client.get_chat_member(grp_id, userid)
-    if not ((st.status == "administrator") or (st.status == "creator") or (str(userid) in Config.AUTH_USERS)):
-        return
-
+def get_all_filters():
     try:
-        cmd, text = message.text.split(" ", 1)
-    except:
-        await message.reply_text(
-            "<i>Mention the filtername which you wanna delete!</i>\n\n"
-            "<code>/del filtername</code>\n\n"
-            "Use /viewfilters to view all available filters",
-            quote=True
-        )
-        return
-
-    query = text.lower()
-
-    await delete_filter(message, query, grp_id)
-        
-
-@Client.on_message(filters.command(Config.DELETE_ALL_CMD))
-async def delallconfirm(client, message):
-    userid = message.from_user.id
-    chat_type = message.chat.type
-
-    if chat_type == "private":
-        grpid  = await active_connection(str(userid))
-        if grpid is not None:
-            grp_id = grpid
-            try:
-                chat = await client.get_chat(grpid)
-                title = chat.title
-            except:
-                await message.reply_text("Make sure I'm present in your group!!", quote=True)
-                return
-        else:
-            await message.reply_text("I'm not connected to any groups!", quote=True)
-            return
-
-    elif (chat_type == "group") or (chat_type == "supergroup"):
-        grp_id = message.chat.id
-        title = message.chat.title
-
-    else:
-        return
-
-    st = await client.get_chat_member(grp_id, userid)
-    if (st.status == "creator") or (str(userid) in Config.AUTH_USERS):
-        await message.reply_text(
-            f"This will delete all filters from '{title}'.\nDo you want to continue??",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(text="YES",callback_data="delallconfirm")],
-                [InlineKeyboardButton(text="CANCEL",callback_data="delallcancel")]
-            ]),
-            quote=True
-        )
+        return SESSION.query(CustomFilters).all()
+    finally:
+        SESSION.close()
 
 
-@Client.on_message(filters.group & filters.text)
-async def give_filter(client,message):
-    group_id = message.chat.id
-    name = message.text
+def add_filter(chat_id, keyword, reply, is_sticker=False, is_document=False, is_image=False, is_audio=False,
+               is_voice=False, is_video=False, buttons=None):
+    global CHAT_FILTERS
 
-    keywords = await get_filters(group_id)
-    for keyword in reversed(sorted(keywords, key=len)):
-        pattern = r"( |^|[^\w])" + re.escape(keyword) + r"( |$|[^\w])"
-        if re.search(pattern, name, flags=re.IGNORECASE):
-            reply_text, btn, alert, fileid = await find_filter(group_id, keyword)
+    if buttons is None:
+        buttons = []
 
-            if reply_text:
-                reply_text = reply_text.replace("\\n", "\n").replace("\\t", "\t")
+    with CUST_FILT_LOCK:
+        prev = SESSION.query(CustomFilters).get((str(chat_id), keyword))
+        if prev:
+            with BUTTON_LOCK:
+                prev_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id),
+                                                             Buttons.keyword == keyword).all()
+                for btn in prev_buttons:
+                    SESSION.delete(btn)
+            SESSION.delete(prev)
 
-            if btn is not None:
-                try:
-                    if fileid == "None":
-                        if btn == "[]":
-                            await message.reply_text(reply_text, disable_web_page_preview=True)
-                        else:
-                            button = eval(btn)
-                            await message.reply_text(
-                                reply_text,
-                                disable_web_page_preview=True,
-                                reply_markup=InlineKeyboardMarkup(button)
-                            )
-                    else:
-                        if btn == "[]":
-                            await message.reply_cached_media(
-                                fileid,
-                                caption=reply_text or ""
-                            )
-                        else:
-                            button = eval(btn) 
-                            await message.reply_cached_media(
-                                fileid,
-                                caption=reply_text or "",
-                                reply_markup=InlineKeyboardMarkup(button)
-                            )
-                except Exception as e:
-                    print(e)
-                    pass
-                break 
-                
-    if Config.SAVE_USER == "yes":
-        try:
-            await add_user(
-                str(message.from_user.id),
-                str(message.from_user.username),
-                str(message.from_user.first_name + " " + (message.from_user.last_name or "")),
-                str(message.from_user.dc_id)
-            )
-        except:
-            pass
-      
+        filt = CustomFilters(str(chat_id), keyword, reply, is_sticker, is_document, is_image, is_audio, is_voice,
+                             is_video, bool(buttons))
+
+        if keyword not in CHAT_FILTERS.get(str(chat_id), []):
+            CHAT_FILTERS[str(chat_id)] = sorted(CHAT_FILTERS.get(str(chat_id), []) + [keyword],
+                                                key=lambda x: (-len(x), x))
+
+        SESSION.add(filt)
+        SESSION.commit()
+
+    for b_name, url, same_line in buttons:
+        add_note_button_to_db(chat_id, keyword, b_name, url, same_line)
+
+
+def remove_filter(chat_id, keyword):
+    global CHAT_FILTERS
+    with CUST_FILT_LOCK:
+        filt = SESSION.query(CustomFilters).get((str(chat_id), keyword))
+        if filt:
+            if keyword in CHAT_FILTERS.get(str(chat_id), []):  # Sanity check
+                CHAT_FILTERS.get(str(chat_id), []).remove(keyword)
+
+            with BUTTON_LOCK:
+                prev_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id),
+                                                             Buttons.keyword == keyword).all()
+                for btn in prev_buttons:
+                    SESSION.delete(btn)
+
+            SESSION.delete(filt)
+            SESSION.commit()
+            return True
+
+        SESSION.close()
+        return False
+
+
+def get_chat_triggers(chat_id):
+    return CHAT_FILTERS.get(str(chat_id), set())
+
+
+def get_chat_filters(chat_id):
+    try:
+        return SESSION.query(CustomFilters).filter(CustomFilters.chat_id == str(chat_id)).order_by(
+            func.length(CustomFilters.keyword).desc()).order_by(CustomFilters.keyword.asc()).all()
+    finally:
+        SESSION.close()
+
+
+def get_filter(chat_id, keyword):
+    try:
+        return SESSION.query(CustomFilters).get((str(chat_id), keyword))
+    finally:
+        SESSION.close()
+
+
+def add_note_button_to_db(chat_id, keyword, b_name, url, same_line):
+    with BUTTON_LOCK:
+        button = Buttons(chat_id, keyword, b_name, url, same_line)
+        SESSION.add(button)
+        SESSION.commit()
+
+
+def get_buttons(chat_id, keyword):
+    try:
+        return SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id), Buttons.keyword == keyword).order_by(
+            Buttons.id).all()
+    finally:
+        SESSION.close()
+
+
+def num_filters():
+    try:
+        return SESSION.query(CustomFilters).count()
+    finally:
+        SESSION.close()
+
+
+def num_chats():
+    try:
+        return SESSION.query(func.count(distinct(CustomFilters.chat_id))).scalar()
+    finally:
+        SESSION.close()
+
+
+def __load_chat_filters():
+    global CHAT_FILTERS
+    try:
+        chats = SESSION.query(CustomFilters.chat_id).distinct().all()
+        for (chat_id,) in chats:  # remove tuple by ( ,)
+            CHAT_FILTERS[chat_id] = []
+
+        all_filters = SESSION.query(CustomFilters).all()
+        for x in all_filters:
+            CHAT_FILTERS[x.chat_id] += [x.keyword]
+
+        CHAT_FILTERS = {x: sorted(set(y), key=lambda i: (-len(i), i)) for x, y in CHAT_FILTERS.items()}
+
+    finally:
+        SESSION.close()
+
+
+def migrate_chat(old_chat_id, new_chat_id):
+    with CUST_FILT_LOCK:
+        chat_filters = SESSION.query(CustomFilters).filter(CustomFilters.chat_id == str(old_chat_id)).all()
+        for filt in chat_filters:
+            filt.chat_id = str(new_chat_id)
+        SESSION.commit()
+        CHAT_FILTERS[str(new_chat_id)] = CHAT_FILTERS[str(old_chat_id)]
+        del CHAT_FILTERS[str(old_chat_id)]
+
+        with BUTTON_LOCK:
+            chat_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(old_chat_id)).all()
+            for btn in chat_buttons:
+                btn.chat_id = str(new_chat_id)
+            SESSION.commit()
+
+
+__load_chat_filters()
