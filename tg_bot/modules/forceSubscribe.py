@@ -4,8 +4,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-@Client.on_callback_query(static_data_filter)
-def _onUnMuteRequest(client, cb):
+
   user_id = cb.from_user.id
   chat_id = cb.message.chat.id
   chat_db = sql.fs_settings(chat_id)
