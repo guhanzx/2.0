@@ -1,10 +1,6 @@
 import time
 import logging
 
-from pyrogram import Client, filters
-from sql_helpers import forceSubscribe_sql as sql
-from pyrogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors.exceptions.bad_request_400 import UserNotParticipant, UsernameNotOccupied, ChatAdminRequired, PeerIdInvalid
 
 logging.basicConfig(level=logging.INFO)
 
