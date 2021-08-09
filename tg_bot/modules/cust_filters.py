@@ -1,345 +1,213 @@
-import re
-from typing import Optional
-
-import telegram
-from telegram import ParseMode, InlineKeyboardMarkup, Message, Chat
-from telegram import Update, Bot
-from telegram.error import BadRequest
-from telegram.ext import CommandHandler, MessageHandler, DispatcherHandlerStop, run_async, Filters
-from telegram.utils.helpers import escape_markdown
-
-from bot import dispatcher, LOGGER
-from bot.modules.disable import DisableAbleCommandHandler
-from bot.modules.helper_funcs.chat_status import user_admin
-from bot.modules.helper_funcs.extraction import extract_text
-from bot.modules.helper_funcs.filters import CustomFilters
-from bot.modules.helper_funcs.misc import build_keyboard
-from bot.modules.helper_funcs.string_handling import split_quotes, button_markdown_parser
-from bot.modules.sql import cust_filters_sql as sql
-
-from bot.modules.connection import connected
-
-HANDLER_GROUP = 15
-BASIC_FILTER_STRING = "*Filters in this chat:*\n"
-
-
-@run_async
-def list_handlers(bot: Bot, update: Update):
-    chat = update.effective_chat  # type: Optional[Chat]
-    user = update.effective_user  # type: Optional[User]
-
-    conn = connected(bot, update, chat, user.id, need_admin=False)
-    if not conn == False:
-        chat_id = conn
-        chat_name = dispatcher.bot.getChat(conn).title
-        filter_list = "*Filters in {}:*\n"
-    else:
-        chat_id = update.effective_chat.id
-        if chat.type == "private":
-            chat_name = "local filters"
-            filter_list = "*local filters:*\n"
-        else:
-            chat_name = chat.title
-            filter_list = "*Filters in {}*:\n".format(chat_name)
-
-
-    all_handlers = sql.get_chat_triggers(chat_id)
-
-    if not all_handlers:
-        update.effective_message.reply_text("No filters in *{}*!".format(chat_name))
-        return
-
-    for keyword in all_handlers:
-        entry = " - {}\n".format(escape_markdown(keyword))
-        if len(entry) + len(filter_list) > telegram.MAX_MESSAGE_LENGTH:
-            update.effective_message.reply_text(filter_list, parse_mode=telegram.ParseMode.MARKDOWN)
-            filter_list = entry
-        else:
-            filter_list += entry
-
-    if not filter_list == BASIC_FILTER_STRING:
-        update.effective_message.reply_text(filter_list, parse_mode=telegram.ParseMode.MARKDOWN)
-
-
-# NOT ASYNC BECAUSE DISPATCHER HANDLER RAISED
-@user_admin
-def filters(bot: Bot, update: Update):
-    chat = update.effective_chat  # type: Optional[Chat]
-    user = update.effective_user  # type: Optional[User]
-    msg = update.effective_message  # type: Optional[Message]
-    args = msg.text.split(None, 1)  # use python's maxsplit to separate Cmd, keyword, and reply_text
-
-    conn = connected(bot, update, chat, user.id)
-    if not conn == False:
-        chat_id = conn
-        chat_name = dispatcher.bot.getChat(conn).title
-    else:
-        chat_id = update.effective_chat.id
-        if chat.type == "private":
-            chat_name = "local filters"
-        else:
-            chat_name = chat.title
-
-    if len(args) < 2:
-        return
-
-
-    extracted = split_quotes(args[1])
-    if len(extracted) < 1:
-        return
-    # set trigger -> lower, so as to avoid adding duplicate filters with different cases
-    keyword = extracted[0].lower()
-
-    is_sticker = False
-    is_document = False
-    is_image = False
-    is_voice = False
-    is_audio = False
-    is_video = False
-    media_caption = None
-    has_caption = False
-    buttons = []
-
-    # determine what the contents of the filter are - text, image, sticker, etc
-    if len(extracted) >= 2:
-        offset = len(extracted[1]) - len(msg.text)  # set correct offset relative to command + notename
-        content, buttons = button_markdown_parser(extracted[1], entities=msg.parse_entities(), offset=offset)
-        content = content.strip()
-        if not content:
-            msg.reply_text("There is no note message - You can't JUST have buttons, you need a message to go with it!")
-            return
-
-    elif msg.reply_to_message and msg.reply_to_message.sticker:
-        content = msg.reply_to_message.sticker.file_id
-        is_sticker = True
-        # stickers don't have caption in BOT API -_-
-
-    elif msg.reply_to_message and msg.reply_to_message.document:
-        offset = len(msg.reply_to_message.caption)
-        media_caption, buttons = button_markdown_parser(msg.reply_to_message.caption, entities=msg.reply_to_message.parse_entities(), offset=offset)
-        content = msg.reply_to_message.document.file_id
-        is_document = True
-        has_caption = True
-
-    elif msg.reply_to_message and msg.reply_to_message.photo:
-        offset = len(msg.reply_to_message.caption)
-        media_caption, buttons = button_markdown_parser(msg.reply_to_message.caption, entities=msg.reply_to_message.parse_entities(), offset=offset)
-        content = msg.reply_to_message.photo[-1].file_id  # last elem = best quality
-        is_image = True
-        has_caption = True
-
-    elif msg.reply_to_message and msg.reply_to_message.audio:
-        offset = len(msg.reply_to_message.caption)
-        media_caption, buttons = button_markdown_parser(msg.reply_to_message.caption, entities=msg.reply_to_message.parse_entities(), offset=offset)
-        content = msg.reply_to_message.audio.file_id
-        is_audio = True
-        has_caption = True
-
-    elif msg.reply_to_message and msg.reply_to_message.voice:
-        offset = len(msg.reply_to_message.caption)
-        media_caption, buttons = button_markdown_parser(msg.reply_to_message.caption, entities=msg.reply_to_message.parse_entities(), offset=offset)
-        content = msg.reply_to_message.voice.file_id
-        is_voice = True
-        has_caption = True
-
-    elif msg.reply_to_message and msg.reply_to_message.video:
-        offset = len(msg.reply_to_message.caption)
-        media_caption, buttons = button_markdown_parser(msg.reply_to_message.caption, entities=msg.reply_to_message.parse_entities(), offset=offset)
-        content = msg.reply_to_message.video.file_id
-        is_video = True
-        has_caption = True
-
-    else:
-        msg.reply_text("You didn't specify what to reply with!")
-        return
-
-    # Add the filter
-    # Note: perhaps handlers can be removed somehow using sql.get_chat_filters
-    for handler in dispatcher.handlers.get(HANDLER_GROUP, []):
-        if handler.filters == (keyword, chat.id):
-            dispatcher.remove_handler(handler, HANDLER_GROUP)
-
-    sql.add_filter(chat_id, keyword, content, is_sticker, is_document, is_image, is_audio, is_voice, is_video,
-                   buttons, media_caption, has_caption)
-
-    msg.reply_text("Filter '{}' Added==> *{}*!".format(keyword, chat_name), parse_mode=telegram.ParseMode.MARKDOWN)
-    raise DispatcherHandlerStop
-
-
-# NOT ASYNC BECAUSE DISPATCHER HANDLER RAISED
-@user_admin
-def stop_filter(bot: Bot, update: Update):
-    chat = update.effective_chat  # type: Optional[Chat]
-    user = update.effective_user  # type: Optional[User]
-    args = update.effective_message.text.split(None, 1)
-
-    conn = connected(bot, update, chat, user.id)
-    if not conn == False:
-        chat_id = conn
-        chat_name = dispatcher.bot.getChat(conn).title
-    else:
-        chat_id = chat.id
-        if chat.type == "private":
-            chat_name = "local notes"
-        else:
-            chat_name = chat.title
-
-    if len(args) < 2:
-        return
-
-    chat_filters = sql.get_chat_triggers(chat_id)
-
-    if not chat_filters:
-        update.effective_message.reply_text("No filters are active here!")
-        return
-
-    for keyword in chat_filters:
-        if keyword == args[1]:
-            sql.remove_filter(chat_id, args[1])
-            update.effective_message.reply_text("_Filter Deleted Successfully_ *{}*.".format(chat_name), parse_mode=telegram.ParseMode.MARKDOWN)
-            raise DispatcherHandlerStop
-
-    update.effective_message.reply_text("Your Filter Keyword is Incorrect please check Your Keyword /filters")
-
-
-@run_async
-def reply_filter(bot: Bot, update: Update):
-    chat = update.effective_chat  # type: Optional[Chat]
-    message = update.effective_message  # type: Optional[Message]
-    to_match = extract_text(message)
-    if not to_match:
-        return
-
-    if message.reply_to_message:
-        message = message.reply_to_message
-
-
-    chat_filters = sql.get_chat_triggers(chat.id)
-    for keyword in chat_filters:
-        pattern = r"( |^|[^\w])" + re.escape(keyword) + r"( |$|[^\w])"
-        if re.search(pattern, to_match, flags=re.IGNORECASE):
-            filt = sql.get_filter(chat.id, keyword)
-            buttons = sql.get_buttons(chat.id, filt.keyword)
-            media_caption = filt.caption if filt.caption is not None else ""
-            if filt.is_sticker:
-                message.reply_sticker(filt.reply)
-            elif filt.is_document:
-                message.reply_document(filt.reply, caption=media_caption, parse_mode=ParseMode.MARKDOWN)
-            elif filt.is_image:
-                if len(buttons) > 0:
-                    keyb = build_keyboard(buttons)
-                    keyboard = InlineKeyboardMarkup(keyb)
-                    message.reply_photo(filt.reply, caption=media_caption, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-                else:
-                    message.reply_photo(filt.reply, caption=media_caption, parse_mode=ParseMode.MARKDOWN)
-            elif filt.is_audio:
-                message.reply_audio(filt.reply, caption=media_caption, parse_mode=ParseMode.MARKDOWN)
-            elif filt.is_voice:
-                message.reply_voice(filt.reply, caption=media_caption, parse_mode=ParseMode.MARKDOWN)
-            elif filt.is_video:
-                message.reply_video(filt.reply, caption=media_caption, parse_mode=ParseMode.MARKDOWN)
-            elif filt.has_markdown:
-                keyb = build_keyboard(buttons)
-                keyboard = InlineKeyboardMarkup(keyb)
-
-                should_preview_disabled = True
-                if "telegra.ph" in filt.reply or "youtu.be" in filt.reply:
-                    should_preview_disabled = False
-
-                try:
-                    message.reply_text(filt.reply, parse_mode=ParseMode.MARKDOWN,
-                                       disable_web_page_preview=should_preview_disabled,
-                                       reply_markup=keyboard)
-                except BadRequest as excp:
-                    if excp.message == "Unsupported url protocol":
-                        message.reply_text("You seem to be trying to use an unsupported url protocol. Telegram "
-                                           "doesn't support buttons for some protocols, such as tg://. Please try "
-                                           "again, or ask in @D_ar_k_Angel for help.")
-                    elif excp.message == "Reply message not found":
-                        bot.send_message(chat.id, filt.reply, parse_mode=ParseMode.MARKDOWN,
-                                         disable_web_page_preview=True,
-                                         reply_markup=keyboard)
-                    else:
-                        message.reply_text("This note could not be sent, as it is incorrectly formatted. Ask in "
-                                           "@D_ar_k_Angel if you can't figure out why!")
-                        LOGGER.warning("Message %s could not be parsed", str(filt.reply))
-                        LOGGER.exception("Could not parse filter %s in chat %s", str(filt.keyword), str(chat.id))
-
-            else:
-                # LEGACY - all new filters will have has_markdown set to True.
-                message.reply_text(filt.reply)
-            break
-
-@run_async
-@user_admin
-def stop_all_filters(bot: Bot, update: Update):
-    chat = update.effective_chat
-    user = update.effective_user
-    message = update.effective_message
-
-    if chat.type == "private":
-        chat.title = "local filters"
-    else:
-        owner = chat.get_member(user.id)
-        chat.title = chat.title	
-        if owner.status != 'creator':	
-            message.reply_text("You must be this chat creator.")	
-            return
-
-    x = 0
-    flist = sql.get_chat_triggers(chat.id)
-
-    if not flist:
-        message.reply_text("There aren't any active filters in {} !".format(chat.title))
-        return
-
-    f_flist = []
-    for f in flist:
-        x += 1
-        f_flist.append(f)
-
-    for fx in f_flist:
-        sql.remove_filter(chat.id, fx)
-
-    message.reply_text("{} filters from this chat have been removed.".format(x))
-
-
-def __stats__():
-    return "{} filters, across {} chats.".format(sql.num_filters(), sql.num_chats())
-
-
-def __migrate__(old_chat_id, new_chat_id):
-    sql.migrate_chat(old_chat_id, new_chat_id)
-
-
-def __chat_settings__(chat_id, user_id):
-    cust_filters = sql.get_chat_triggers(chat_id)
-    return "There are `{}` custom filters here.".format(len(cust_filters))
-
-
-__help__ = """
- • /filters: list all active filters in this chat.
-
-*Admin only:*
- • /filter <keyword> <reply message>: add a filter to this chat. The bot will now reply that message whenever 'keyword'\
-is mentioned. If you reply to a sticker with a keyword, the bot will reply with that sticker. NOTE: all filter \
-keywords are in lowercase. If you want your keyword to be a sentence, use quotes. eg: /filter "hey there" How you \
-doin?
- • /stop <filter keyword>: stop that filter.
- • /stopall: stop all filters
-
-"""
-
-__mod_name__ = "FILTERS 📜"
-
-FILTER_HANDLER = CommandHandler("filter", filters)
-STOP_HANDLER = CommandHandler("stop", stop_filter)
-STOPALL_HANDLER = DisableAbleCommandHandler("stopall", stop_all_filters)
-LIST_HANDLER = DisableAbleCommandHandler("filters", list_handlers, admin_ok=True)
-CUST_FILTER_HANDLER = MessageHandler(CustomFilters.has_text, reply_filter)
-
-dispatcher.add_handler(FILTER_HANDLER)
-dispatcher.add_handler(STOP_HANDLER)
-dispatcher.add_handler(STOPALL_HANDLER)
-dispatcher.add_handler(LIST_HANDLER)
-dispatcher.add_handler(CUST_FILTER_HANDLER, HANDLER_GROUP)
+import threading
+
+from sqlalchemy import Column, String, UnicodeText, Boolean, Integer, distinct, func
+
+from tg_bot.modules.sql import BASE, SESSION
+
+
+class CustomFilters(BASE):
+    __tablename__ = "cust_filters"
+    chat_id = Column(String(14), primary_key=True)
+    keyword = Column(UnicodeText, primary_key=True, nullable=False)
+    reply = Column(UnicodeText, nullable=False)
+    is_sticker = Column(Boolean, nullable=False, default=False)
+    is_document = Column(Boolean, nullable=False, default=False)
+    is_image = Column(Boolean, nullable=False, default=False)
+    is_audio = Column(Boolean, nullable=False, default=False)
+    is_voice = Column(Boolean, nullable=False, default=False)
+    is_video = Column(Boolean, nullable=False, default=False)
+
+    has_buttons = Column(Boolean, nullable=False, default=False)
+    # NOTE: Here for legacy purposes, to ensure older filters don't mess up.
+    has_markdown = Column(Boolean, nullable=False, default=False)
+
+    def __init__(self, chat_id, keyword, reply, is_sticker=False, is_document=False, is_image=False, is_audio=False,
+                 is_voice=False, is_video=False, has_buttons=False):
+        self.chat_id = str(chat_id)  # ensure string
+        self.keyword = keyword
+        self.reply = reply
+        self.is_sticker = is_sticker
+        self.is_document = is_document
+        self.is_image = is_image
+        self.is_audio = is_audio
+        self.is_voice = is_voice
+        self.is_video = is_video
+        self.has_buttons = has_buttons
+        self.has_markdown = True
+
+    def __repr__(self):
+        return "<Permissions for %s>" % self.chat_id
+
+    def __eq__(self, other):
+        return bool(isinstance(other, CustomFilters)
+                    and self.chat_id == other.chat_id
+                    and self.keyword == other.keyword)
+
+
+class Buttons(BASE):
+    __tablename__ = "cust_filter_urls"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String(14), primary_key=True)
+    keyword = Column(UnicodeText, primary_key=True)
+    name = Column(UnicodeText, nullable=False)
+    url = Column(UnicodeText, nullable=False)
+    same_line = Column(Boolean, default=False)
+
+    def __init__(self, chat_id, keyword, name, url, same_line=False):
+        self.chat_id = str(chat_id)
+        self.keyword = keyword
+        self.name = name
+        self.url = url
+        self.same_line = same_line
+
+
+CustomFilters.__table__.create(checkfirst=True)
+Buttons.__table__.create(checkfirst=True)
+
+CUST_FILT_LOCK = threading.RLock()
+BUTTON_LOCK = threading.RLock()
+CHAT_FILTERS = {}
+
+
+def get_all_filters():
+    try:
+        return SESSION.query(CustomFilters).all()
+    finally:
+        SESSION.close()
+
+
+def add_filter(chat_id, keyword, reply, is_sticker=False, is_document=False, is_image=False, is_audio=False,
+               is_voice=False, is_video=False, buttons=None):
+    global CHAT_FILTERS
+
+    if buttons is None:
+        buttons = []
+
+    with CUST_FILT_LOCK:
+        prev = SESSION.query(CustomFilters).get((str(chat_id), keyword))
+        if prev:
+            with BUTTON_LOCK:
+                prev_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id),
+                                                             Buttons.keyword == keyword).all()
+                for btn in prev_buttons:
+                    SESSION.delete(btn)
+            SESSION.delete(prev)
+
+        filt = CustomFilters(str(chat_id), keyword, reply, is_sticker, is_document, is_image, is_audio, is_voice,
+                             is_video, bool(buttons))
+
+        if keyword not in CHAT_FILTERS.get(str(chat_id), []):
+            CHAT_FILTERS[str(chat_id)] = sorted(CHAT_FILTERS.get(str(chat_id), []) + [keyword],
+                                                key=lambda x: (-len(x), x))
+
+        SESSION.add(filt)
+        SESSION.commit()
+
+    for b_name, url, same_line in buttons:
+        add_note_button_to_db(chat_id, keyword, b_name, url, same_line)
+
+
+def remove_filter(chat_id, keyword):
+    global CHAT_FILTERS
+    with CUST_FILT_LOCK:
+        filt = SESSION.query(CustomFilters).get((str(chat_id), keyword))
+        if filt:
+            if keyword in CHAT_FILTERS.get(str(chat_id), []):  # Sanity check
+                CHAT_FILTERS.get(str(chat_id), []).remove(keyword)
+
+            with BUTTON_LOCK:
+                prev_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id),
+                                                             Buttons.keyword == keyword).all()
+                for btn in prev_buttons:
+                    SESSION.delete(btn)
+
+            SESSION.delete(filt)
+            SESSION.commit()
+            return True
+
+        SESSION.close()
+        return False
+
+
+def get_chat_triggers(chat_id):
+    return CHAT_FILTERS.get(str(chat_id), set())
+
+
+def get_chat_filters(chat_id):
+    try:
+        return SESSION.query(CustomFilters).filter(CustomFilters.chat_id == str(chat_id)).order_by(
+            func.length(CustomFilters.keyword).desc()).order_by(CustomFilters.keyword.asc()).all()
+    finally:
+        SESSION.close()
+
+
+def get_filter(chat_id, keyword):
+    try:
+        return SESSION.query(CustomFilters).get((str(chat_id), keyword))
+    finally:
+        SESSION.close()
+
+
+def add_note_button_to_db(chat_id, keyword, b_name, url, same_line):
+    with BUTTON_LOCK:
+        button = Buttons(chat_id, keyword, b_name, url, same_line)
+        SESSION.add(button)
+        SESSION.commit()
+
+
+def get_buttons(chat_id, keyword):
+    try:
+        return SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id), Buttons.keyword == keyword).order_by(
+            Buttons.id).all()
+    finally:
+        SESSION.close()
+
+
+def num_filters():
+    try:
+        return SESSION.query(CustomFilters).count()
+    finally:
+        SESSION.close()
+
+
+def num_chats():
+    try:
+        return SESSION.query(func.count(distinct(CustomFilters.chat_id))).scalar()
+    finally:
+        SESSION.close()
+
+
+def __load_chat_filters():
+    global CHAT_FILTERS
+    try:
+        chats = SESSION.query(CustomFilters.chat_id).distinct().all()
+        for (chat_id,) in chats:  # remove tuple by ( ,)
+            CHAT_FILTERS[chat_id] = []
+
+        all_filters = SESSION.query(CustomFilters).all()
+        for x in all_filters:
+            CHAT_FILTERS[x.chat_id] += [x.keyword]
+
+        CHAT_FILTERS = {x: sorted(set(y), key=lambda i: (-len(i), i)) for x, y in CHAT_FILTERS.items()}
+
+    finally:
+        SESSION.close()
+
+
+def migrate_chat(old_chat_id, new_chat_id):
+    with CUST_FILT_LOCK:
+        chat_filters = SESSION.query(CustomFilters).filter(CustomFilters.chat_id == str(old_chat_id)).all()
+        for filt in chat_filters:
+            filt.chat_id = str(new_chat_id)
+        SESSION.commit()
+        CHAT_FILTERS[str(new_chat_id)] = CHAT_FILTERS[str(old_chat_id)]
+        del CHAT_FILTERS[str(old_chat_id)]
+
+        with BUTTON_LOCK:
+            chat_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(old_chat_id)).all()
+            for btn in chat_buttons:
+                btn.chat_id = str(new_chat_id)
+            SESSION.commit()
+
+
+__load_chat_filters()
